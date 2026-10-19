@@ -281,7 +281,11 @@ function parseEvent(ev){
     else if(homeScore !== null && homeScore === awayScore) winner = 'TIE';
   }
   const rec = (c, type) => { const r = (c.records || []).find(x => x.type === type); return r ? r.summary : ''; };
+  // Betting line, when ESPN includes it (usually only before kickoff).
+  const odds = (comp.odds || [])[0] || null;
+  const ouNum = odds && odds.overUnder != null ? parseFloat(odds.overUnder) : NaN;
   return {
+    ou: isNaN(ouNum) ? null : ouNum, spread: (odds && odds.details) || null,
     id: ev.id, seasonType, week, weekKey: weekKeyOf(seasonType, week),
     eventTime: ev.date, date: dateStrET(new Date(ev.date)),
     away: awayAbbr, home: homeAbbr, awayScore, homeScore, winner,

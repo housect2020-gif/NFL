@@ -165,6 +165,12 @@
   .h2h-actual-loser{font-weight:400; font-size:10.5px; color:var(--sub); opacity:.7;}
   .h2h-tier-tag{font-weight:600; font-size:10px; color:var(--accent); opacity:.75;}
   .h2h-pretied{font-weight:400; font-size:9.5px; color:var(--sub); opacity:.65; font-style:italic;}
+  td.ou{font-family:var(--font-mono); font-size:12px;}
+  .ou-line{font-weight:700; color:var(--text);}
+  .ou-total{color:var(--sub); font-size:11px;}
+  .ou-over{font-weight:800; color:var(--win); font-family:var(--font-ui); font-size:11px;}
+  .ou-under{font-weight:800; color:var(--accent); font-family:var(--font-ui); font-size:11px;}
+  .ou-push{font-weight:800; color:var(--sub); font-family:var(--font-ui); font-size:11px;}
   .error-row td{padding:28px; text-align:center; color:var(--sub); white-space:normal;}
 
   footer{padding:12px 18px; font-size:11px; color:#8189a0; background:var(--colhead-bg); border-top:1px solid var(--grid);}
@@ -201,6 +207,7 @@
   <div class="h2h-stat-box" id="lastWeekStatBox">Loading…</div>
   <div class="h2h-stat-box" id="last3StatBox">Loading…</div>
   <div class="h2h-stat-box" id="seasonStatBox">Loading…</div>
+  <div class="h2h-stat-box" id="ouStatBox">Loading…</div>
 </div>
 
 <div class="toolbar">
@@ -235,7 +242,7 @@
   <thead>
     <tr class="colletters">
       <th></th>
-      <th>A</th><th>B</th><th>C</th><th>D</th><th>E</th><th>F</th><th>G</th>
+      <th>A</th><th>B</th><th>C</th><th>D</th><th>E</th><th>F</th><th>G</th><th>H</th>
     </tr>
     <tr class="headers">
       <th></th>
@@ -246,6 +253,7 @@
       <th>Current / Winner Record</th>
       <th>Head-to-Head Record</th>
       <th>H2H Outcome Winner</th>
+      <th>Over / Under</th>
     </tr>
   </thead>
   <tbody id="sheetBody"></tbody>
@@ -253,7 +261,7 @@
 </div>
 
 <footer>
-  Season results are pulled live from ESPN's public NFL scoreboard each time this page loads (through <span id="histThrough">—</span>). This week's games refresh every 30 seconds while a game is live or about to kick off, and less often otherwise. Head-to-head counts only meetings <em>before</em> each game, this season. No API key required.
+  Season results are pulled live from ESPN's public NFL scoreboard each time this page loads (through <span id="histThrough">—</span>). This week's games refresh every 30 seconds while a game is live or about to kick off, and less often otherwise. Head-to-head counts only meetings <em>before</em> each game, this season. Over/Under lines come from ESPN's sportsbook partner: upcoming games show the current line; finished games use the closing line, fetched once per game and saved in this browser. No API key required.
   <div style="margin-top:6px; color:#a7b2c2;" id="versionTag">version: loading…</div>
 </footer>
 
@@ -329,7 +337,11 @@ function parseEvent(ev){
     else if(homeScore !== null && homeScore === awayScore) winner = 'TIE';
   }
   const rec = (c, type) => { const r = (c.records || []).find(x => x.type === type); return r ? r.summary : ''; };
+  // Betting line, when ESPN includes it (usually only before kickoff).
+  const odds = (comp.odds || [])[0] || null;
+  const ouNum = odds && odds.overUnder != null ? parseFloat(odds.overUnder) : NaN;
   return {
+    ou: isNaN(ouNum) ? null : ouNum, spread: (odds && odds.details) || null,
     id: ev.id, seasonType, week, weekKey: weekKeyOf(seasonType, week),
     eventTime: ev.date, date: dateStrET(new Date(ev.date)),
     away: awayAbbr, home: homeAbbr, awayScore, homeScore, winner,
@@ -440,6 +452,103 @@ function toggleSavedPick(pick, isChecked){
   }
   saveSavedPicksList(picks);
 }
+
+/* ===================== Over / Under ===================== */
+// Lines come from ESPN's partner sportsbook. The scoreboard carries the line
+// before kickoff and usually drops it once a game starts, so every line seen is
+// remembered here. Finished games get their CLOSING line from ESPN's per-game
+// summary (pickcenter). Closing lines never change, so those are cached in this
+// browser and fetched only once per game — later visits load instantly.
+const ESPN_SUMMARY = 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/summary';
+const OU_CACHE_KEY = 'nfl_ou_cache_v1';
+let OU_CACHE = {}; // gameId -> { ou, spread, closing: true if from the summary }
+try{ OU_CACHE = JSON.parse(localStorage.getItem(OU_CACHE_KEY) || '{}') || {}; } catch(e){ OU_CACHE = {}; }
+function saveOUCache(){ try{ localStorage.setItem(OU_CACHE_KEY, JSON.stringify(OU_CACHE)); } catch(e){} }
+
+// Records a line we just saw, or fills in one ESPN has since dropped.
+function applyOU(g){
+  const c = OU_CACHE[g.id];
+  if(c && c.closing){ g.ou = c.ou; g.spread = c.spread || g.spread; return; }
+  if(g.ou != null){ OU_CACHE[g.id] = { ou: g.ou, spread: g.spread, closing: false }; }
+  else if(c){ g.ou = c.ou; g.spread = g.spread || c.spread; }
+}
+
+// 'OVER' / 'UNDER' / 'PUSH' for a finished game with a line, else null.
+function ouResult(g){
+  if(!g.winner || g.ou == null || g.awayScore == null || g.homeScore == null) return null;
+  const total = g.awayScore + g.homeScore;
+  return total > g.ou ? 'OVER' : (total < g.ou ? 'UNDER' : 'PUSH');
+}
+
+let OU_FETCHING = false;
+// Pulls closing lines for finished games that don't have one cached yet,
+// 6 requests at a time, then refreshes the sheet and the O/U box.
+async function fetchClosingLines(){
+  if(OU_FETCHING) return;
+  const todo = SEASON_DATA.filter(g => g.winner && !(OU_CACHE[g.id] && OU_CACHE[g.id].closing));
+  // Games in progress whose line the scoreboard has already dropped.
+  const seen = new Set(todo.map(g => g.id));
+  CURRENT_WEEK_GAMES.forEach(g => { if(!g.winner && g.ou == null && !seen.has(g.id)) todo.push(g); });
+  if(todo.length === 0){ renderOUStatBox(); return; }
+  OU_FETCHING = true;
+  let done = 0;
+  const box = document.getElementById('ouStatBox');
+  const worker = async () => {
+    while(todo.length){
+      const g = todo.shift();
+      try{
+        const res = await fetch(`${ESPN_SUMMARY}?event=${g.id}`);
+        if(res.ok){
+          const json = await res.json();
+          const pc = (json.pickcenter || [])[0];
+          const ou = pc && pc.overUnder != null ? parseFloat(pc.overUnder) : NaN;
+          const isFinal = !!g.winner; // only a finished game's line is the true closing line
+          if(!isNaN(ou)) OU_CACHE[g.id] = { ou, spread: (pc && pc.details) || null, closing: isFinal };
+          else if(isFinal) OU_CACHE[g.id] = { ou: (OU_CACHE[g.id] && OU_CACHE[g.id].ou) ?? null, spread: (OU_CACHE[g.id] && OU_CACHE[g.id].spread) || null, closing: true };
+        }
+      } catch(e){ /* leave uncached; it'll be retried on the next page load */ }
+      done++;
+      if(box) box.innerHTML = `<span class="stat-label">O/U Season</span> loading lines ${done}/${done + todo.length}…`;
+    }
+  };
+  await Promise.all(Array.from({ length: 6 }, worker));
+  saveOUCache();
+  SEASON_DATA.forEach(applyOU);
+  CURRENT_WEEK_GAMES.forEach(applyOU);
+  OU_FETCHING = false;
+  allRows = mergeRows();
+  render();
+  renderOUStatBox();
+}
+
+function renderOUStatBox(){
+  let over = 0, under = 0, push = 0;
+  SEASON_DATA.forEach(g => {
+    const r = ouResult(g);
+    if(r === 'OVER') over++; else if(r === 'UNDER') under++; else if(r === 'PUSH') push++;
+  });
+  const decided = over + under;
+  const el = document.getElementById('ouStatBox');
+  el.innerHTML = `<span class="stat-label">O/U Season</span> Over=${over} Under=${under}${push ? ` Push=${push}` : ''} ` +
+    `<span class="stat-pct">${decided ? (over / decided * 100).toFixed(1) + '% over' : '—'}</span>`;
+  el.title = 'Every finished game this season vs. its closing total (pushes excluded from the %). Lines from ESPN\'s sportsbook partner.';
+}
+
+function ouCellHtml(r){
+  const live = r._live;
+  if(r.ou == null) return '<span style="color:var(--sub);">—</span>';
+  const line = `<span class="ou-line" title="${r.spread ? 'Spread: ' + r.spread : ''}">${r.ou}</span>`;
+  const result = ouResult(r);
+  if(result){
+    const total = r.awayScore + r.homeScore;
+    return `${line} <span class="ou-total">→ ${total}</span> <span class="ou-${result.toLowerCase()}">${result}</span>`;
+  }
+  if(live && live.state === 'in' && live.awayScore != null){
+    return `${line} <span class="ou-total">· now ${live.awayScore + live.homeScore}</span>`;
+  }
+  return `O/U ${line}${r.spread ? ` <span class="ou-total">${r.spread}</span>` : ''}`;
+}
+/* ===================== end Over / Under ===================== */
 
 let SEASON_DATA = [];          // completed games (winner or TIE) this season
 let CURRENT_KEY = null;        // this week's key, e.g. "2-06"
@@ -598,7 +707,7 @@ function render(){
     const msg = viewFilter === 'week' && !CURRENT_KEY
       ? 'No NFL week is in progress right now (preseason or offseason). Switch "Show" to All games to see results.'
       : 'No games match these filters.';
-    tbody.innerHTML = `<tr class="error-row"><td colspan="8">${msg}</td></tr>`;
+    tbody.innerHTML = `<tr class="error-row"><td colspan="9">${msg}</td></tr>`;
   }
 
   filtered.forEach((r, i) => {
@@ -671,6 +780,7 @@ function render(){
       <td class="record">${r.record || ''}</td>
       <td class="h2h">${pickCheckbox} ${r.h2h || ''}${actualWinner ? ' <span class="h2h-actual-winner">(' + winnerDisplay(actualWinner) + ')</span>' : ''}</td>
       <td class="team ${h2hCellClass}">${gMain}</td>
+      <td class="ou">${ouCellHtml(r)}</td>
     `;
     tbody.appendChild(tr);
   });
@@ -727,7 +837,7 @@ function wireCellInspector(){
     const rn = tr.querySelector('.rownum');
     if(!rn) return;
     const colIdx = Array.from(tr.children).indexOf(td);
-    const colLetters = ['', 'A', 'B', 'C', 'D', 'E', 'F', 'G'];
+    const colLetters = ['', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
     document.getElementById('cellRef').textContent = colLetters[colIdx] + (parseInt(rn.textContent, 10) + 1);
     document.getElementById('cellContent').textContent = td.textContent.trim();
   });
@@ -749,7 +859,7 @@ function csvField(val){
 
 // Exports exactly what's on screen (same filters and order) as plain text.
 function exportCsv(){
-  const header = ['Week', 'Kickoff', 'Away', 'Home', 'Winner', 'Current / Winner Record', 'Head-to-Head Record', 'H2H Outcome Winner'];
+  const header = ['Week', 'Kickoff', 'Away', 'Home', 'Winner', 'Current / Winner Record', 'Head-to-Head Record', 'H2H Outcome Winner', 'Over/Under Line', 'Total Points', 'O/U Result'];
   const lines = [header.map(csvField).join(',')];
   CURRENT_FILTERED.forEach(r => {
     const live = r._live;
@@ -769,7 +879,9 @@ function exportCsv(){
 
     const kickoff = `${r.date} ${formatGameTime(r.eventTime)}${r.neutral ? ' (neutral site)' : ''}`;
     const h2hText = (r.h2h || '') + (r.winner ? ` (${winnerDisplay(r.winner)})` : '');
-    lines.push([weekLabel(r.weekKey), kickoff, r.away, r.home, winnerText, r.record || '', h2hText, gText].map(csvField).join(','));
+    const ouRes = ouResult(r);
+    const totalPts = r.awayScore != null && r.homeScore != null && (r.winner || (live && live.state === 'in')) ? r.awayScore + r.homeScore : '';
+    lines.push([weekLabel(r.weekKey), kickoff, r.away, r.home, winnerText, r.record || '', h2hText, gText, r.ou ?? '', totalPts, ouRes || ''].map(csvField).join(','));
   });
   const blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
@@ -810,12 +922,14 @@ async function refreshLive(){
   }
   CURRENT_KEY = ctx.currentKey;
   CURRENT_WEEK_GAMES = ctx.events;
+  CURRENT_WEEK_GAMES.forEach(applyOU);
+  saveOUCache();
   const known = new Map(SEASON_DATA.map(g => [g.id, g]));
   let changed = false;
   CURRENT_WEEK_GAMES.forEach(g => {
     if(g.winner && !known.has(g.id)){ SEASON_DATA.push({ ...g }); changed = true; }
   });
-  if(changed) rebuildDerived();
+  if(changed){ rebuildDerived(); fetchClosingLines(); }
   document.getElementById('lastUpdated').textContent = 'Updated ' + new Date().toLocaleTimeString();
 }
 
@@ -842,8 +956,8 @@ async function init(){
   if(!ctx){
     document.getElementById('rangeSub').textContent = "Couldn't reach ESPN's NFL data — try refreshing in a minute.";
     document.getElementById('lastUpdated').textContent = 'ESPN fetch failed';
-    ['lastWeekStatBox', 'last3StatBox', 'seasonStatBox'].forEach(id => document.getElementById(id).textContent = '—');
-    document.getElementById('sheetBody').innerHTML = `<tr class="error-row"><td colspan="8">ESPN's scoreboard couldn't be reached from this browser. If this keeps happening, ESPN may be blocking browser requests — let me know and we can switch to a scraper-fed data file.</td></tr>`;
+    ['lastWeekStatBox', 'last3StatBox', 'seasonStatBox', 'ouStatBox'].forEach(id => document.getElementById(id).textContent = '—');
+    document.getElementById('sheetBody').innerHTML = `<tr class="error-row"><td colspan="9">ESPN's scoreboard couldn't be reached from this browser. If this keeps happening, ESPN may be blocking browser requests — let me know and we can switch to a scraper-fed data file.</td></tr>`;
     return;
   }
   CURRENT_KEY = ctx.currentKey;
@@ -853,7 +967,11 @@ async function init(){
   SEASON_DATA = all.filter(g => g.winner);
   const known = new Set(SEASON_DATA.map(g => g.id));
   CURRENT_WEEK_GAMES.forEach(g => { if(g.winner && !known.has(g.id)) SEASON_DATA.push({ ...g }); });
+  SEASON_DATA.forEach(applyOU);
+  CURRENT_WEEK_GAMES.forEach(applyOU);
+  saveOUCache();
   rebuildDerived();
+  renderOUStatBox();
 
   const lastKey = SEASON_DATA.length ? SEASON_DATA[SEASON_DATA.length - 1].weekKey : null;
   document.getElementById('rangeSub').textContent =
@@ -881,6 +999,7 @@ async function init(){
   });
 
   scheduleNextRefresh();
+  fetchClosingLines(); // runs in the background; the sheet is already usable
 }
 
 // Version stamp from the file's last-modified date (as reported by GitHub Pages).

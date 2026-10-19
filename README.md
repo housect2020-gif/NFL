@@ -19,6 +19,7 @@ A spreadsheet-style NFL website with live scores, season records, head-to-head r
 - **Season load:** each page loads the full season, one request per week, every time it opens.
 - **Times:** shown in US Eastern (EDT/EST), so dates and kickoffs read the same for every viewer.
 - **Head-to-head:** only counts meetings this season that happened *before* each game. When two teams haven't met or are tied, the pick falls back to the team with the better record entering that week, labeled "No H2H – TEAM" or "Tied – TEAM". These games are left out of the accuracy stat boxes.
+- **Over/Under:** the main sheet has an Over / Under column. Upcoming games show the current total and spread, live games show the running score next to the line, and finished games show the closing line, the final total, and OVER, UNDER or PUSH. The "O/U Season" box counts how often games went over. Closing lines come from ESPN's per-game summary (its sportsbook partner) and are fetched once per game, then saved in your browser so later visits load instantly.
 - **Ties:** count as half a win in winning percentage and break any streak.
 - **My Picks:** stored only in your browser (localStorage, key `nfl_site_picks_v1`). They don't sync across devices and are kept separate from the MLB site's picks.
 - **Version tag:** the bottom of each page shows the date and time that file was last updated, read automatically from GitHub Pages.
