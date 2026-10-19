@@ -350,12 +350,27 @@ function contextFromJson(json){
   };
 }
 
-// The default scoreboard = "this week". It also carries the season calendar.
+// The default scoreboard tells us the current season/week and carries the
+// calendar — but on game days it can list only THAT DAY's games (e.g. just the
+// Monday night game). So the week's games are then requested explicitly by
+// week number, which always returns the whole slate (Thu, Sun and Mon).
 async function fetchSeasonContext(){
   const json = await fetchScoreboard('');
   if(!json) return null;
-  WEEK_LABELS = buildWeekLabels(json);
-  return contextFromJson(json);
+  const labels = buildWeekLabels(json);
+  if(Object.keys(labels).length) WEEK_LABELS = labels;
+  const ctx = contextFromJson(json);
+  if(ctx.currentKey){
+    const weekJson = await fetchScoreboard(`dates=${ctx.year}&seasontype=${ctx.seasonType}&week=${ctx.week}`);
+    if(weekJson && (weekJson.events || []).length){
+      const byId = new Map(ctx.events.map(g => [g.id, g]));
+      (weekJson.events || []).map(parseEvent).filter(Boolean)
+        .filter(g => g.weekKey === ctx.currentKey)
+        .forEach(g => { if(!byId.has(g.id)) byId.set(g.id, g); });
+      ctx.events = Array.from(byId.values()).sort((a, b) => a.eventTime.localeCompare(b.eventTime));
+    }
+  }
+  return ctx;
 }
 
 // Every game this season up to and including the current week, one request per week, in parallel.
@@ -525,6 +540,11 @@ function mergeRows(){
       h2h: h.text, h2h_winner: h.leader, _live: g
     });
   });
+  // Safety net: any finished game from this week that the live feed didn't
+  // list still shows, using the season data's copy.
+  const liveIds = new Set(CURRENT_WEEK_GAMES.map(g => g.id));
+  SEASON_DATA.filter(r => r.weekKey === CURRENT_KEY && !liveIds.has(r.id))
+    .forEach(r => rows.push({ ...r }));
   rows.sort((a, b) => a.eventTime.localeCompare(b.eventTime));
   return rows;
 }
@@ -783,12 +803,11 @@ function updateLivePill(){
 // Re-pulls this week's scoreboard. Any game that has gone final is folded into
 // the season data so records, H2H and the stat boxes stay current.
 async function refreshLive(){
-  const json = await fetchScoreboard('');
-  if(!json){
+  const ctx = await fetchSeasonContext();
+  if(!ctx){
     document.getElementById('lastUpdated').textContent = 'Live fetch failed — showing last known data';
     return;
   }
-  const ctx = contextFromJson(json);
   CURRENT_KEY = ctx.currentKey;
   CURRENT_WEEK_GAMES = ctx.events;
   const known = new Map(SEASON_DATA.map(g => [g.id, g]));
